@@ -2490,6 +2490,25 @@ def terminal_tool(
             # (e.g. grep=1 means "no matches", diff=1 means "files differ")
             exit_note = _interpret_exit_code(command, returncode)
 
+            # T1: Truncar output a 10K chars
+            max_chars = 10_000
+            if output and len(output) > max_chars:
+                # Mantener primeras 500 + ultimas 9500
+                head = output[:500]
+                tail_start = max(500, len(output) - 9500)
+                tail = output[tail_start:]
+                output = f"{head}\n[...{len(output)-len(head)-len(tail)} chars truncated by Hermes efficiency protocol...]\n{tail}"
+            
+            # T2: Cache de tool outputs en Redis (ahorra tokens de repetidos)
+            try:
+                import hashlib as _hashlib
+                import subprocess as _sp
+                _cache_key = f"hermes:toolout:{_hashlib.md5(command.encode()).hexdigest()[:16]}"
+                _sp.run(["redis-cli", "SET", _cache_key, output.strip()[-2000:], "EX", "60"],
+                    capture_output=True, timeout=2)
+            except:
+                pass
+            
             result_dict = {
                 "output": output,
                 "exit_code": returncode,
