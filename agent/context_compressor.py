@@ -948,6 +948,78 @@ class ContextCompressor(ContextEngine):
         return True
 
     # ------------------------------------------------------------------
+    # L21 + L25: RLE de turnos + dedup de tool outputs
+    # ------------------------------------------------------------------
+
+    def _rle_compress_turns(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """L21: Run-length encoding de turnos similares.
+        Si N turnos seguidos tienen el mismo role y contenido similar,
+        comprimir a un solo turno con nota de repeticion.
+        """
+        if not messages:
+            return messages
+        
+        compressed = [messages[0]]
+        consecutive = 1
+        
+        for i in range(1, len(messages)):
+            prev = compressed[-1]
+            curr = messages[i]
+            
+            # Mismo role y mismo contenido
+            if (prev.get("role") == curr.get("role") and 
+                prev.get("content") == curr.get("content")):
+                consecutive += 1
+            else:
+                if consecutive > 1:
+                    # Marcar el ultimo con nota de repeticion
+                    compressed[-1]["content"] = (
+                        f"[repeated {consecutive}x] "
+                        f"{compressed[-1]['content']}"
+                    )
+                compressed.append(curr)
+                consecutive = 1
+        
+        # Marcar el ultimo si quedo pendiente
+        if consecutive > 1:
+            compressed[-1]["content"] = (
+                f"[repeated {consecutive}x] "
+                f"{compressed[-1]['content']}"
+            )
+        
+        return compressed
+
+    def _dedup_tool_outputs(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """L25: Auto-skip tool outputs duplicados.
+        Si una tool call produce output identico a la anterior del mismo tipo,
+        no agregar el duplicado al historial.
+        """
+        if not messages:
+            return messages
+        
+        result = [messages[0]]
+        last_tool_output = None
+        
+        for msg in messages[1:]:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            if role == "tool" and content == last_tool_output:
+                # Output de tool identico al anterior — skip
+                result[-1]["content"] = (
+                    f"{result[-1].get('content', '')}\n"
+                    f"[identical tool output skipped by Hermes efficiency protocol]"
+                )
+                continue
+            
+            if role == "tool":
+                last_tool_output = content
+            
+            result.append(msg)
+        
+        return result
+
+    # ------------------------------------------------------------------
     # Tool output pruning (cheap pre-pass, no LLM call)
     # ------------------------------------------------------------------
 
@@ -2380,6 +2452,11 @@ This compaction should PRIORITISE preserving all information related to the focu
         )
         if pruned_count and not self.quiet_mode:
             logger.info("Pre-compression: pruned %d old tool result(s)", pruned_count)
+
+        # L21: Run-length encoding de turnos similares
+        messages = self._rle_compress_turns(messages)
+        # L25: Auto-skip tool outputs duplicados
+        messages = self._dedup_tool_outputs(messages)
 
         # Phase 2: Determine boundaries
         compress_start = self._protect_head_size(messages)
