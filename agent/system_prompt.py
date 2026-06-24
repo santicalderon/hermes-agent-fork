@@ -423,7 +423,10 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # ── Volatile tier (changes per session/turn — never cached) ───
     volatile_parts: List[str] = []
 
-    if agent._memory_store:
+    # L8: Memory condicional — no inyectar si el turno anterior fue cache hit
+    _skip_memory = bool(getattr(agent, "_last_turn_cache_hit", False))
+    
+    if agent._memory_store and not _skip_memory:
         if agent._memory_enabled:
             mem_block = agent._memory_store.format_for_system_prompt("memory")
             if mem_block:

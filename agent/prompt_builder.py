@@ -1728,6 +1728,11 @@ def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
         return None
     try:
         content = soul_path.read_text(encoding="utf-8").strip()
+        # L6: Strip comentarios HTML <!-- ... --> y blank lines multiples
+        import re as _re6
+        content = _re6.sub(r"<!--.*?-->", "", content, flags=_re6.DOTALL)
+        # L6: Colapsar 3+ blank lines a 2
+        content = _re6.sub(r"\n{3,}", "\n\n", content)
         if not content:
             return None
         content = _scan_context_content(content, "SOUL.md")
