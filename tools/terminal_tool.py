@@ -49,6 +49,9 @@ from utils import env_var_enabled
 
 logger = logging.getLogger(__name__)
 
+# L2: Cache de tool outputs in-session (evita repetir comandos iguales)
+_OUTPUT_CACHE: dict = {}
+
 
 # ---------------------------------------------------------------------------
 # Global interrupt event: set by the agent when a user interrupt arrives.
@@ -2490,21 +2493,73 @@ def terminal_tool(
             # (e.g. grep=1 means "no matches", diff=1 means "files differ")
             exit_note = _interpret_exit_code(command, returncode)
 
-            # T1: Truncar output a 10K chars
-            max_chars = 10_000
-            if output and len(output) > max_chars:
-                # Mantener primeras 500 + ultimas 9500
-                head = output[:500]
-                tail_start = max(500, len(output) - 9500)
-                tail = output[tail_start:]
-                output = f"{head}\n[...{len(output)-len(head)-len(tail)} chars truncated by Hermes efficiency protocol...]\n{tail}"
+            # L1: Truncacion inteligente por tipo de output
+            # L4: Compresion de rutas (HOME -> ~)
+            # L5: Compresion de trailing whitespace
+            if output:
+                # L5: strip trailing whitespace por linea
+                lines = output.split("\n")
+                lines = [l.rstrip() for l in lines]
+                output = "\n".join(lines)
+                
+                # L4: Reemplazar HOME por ~
+                import os as _os4
+                home = _os4.environ.get("HOME", "")
+                if home:
+                    output = output.replace(home, "~")
+                
+                # L1: Truncacion inteligente
+                if len(output) > 10_000:
+                    # Detectar tipo: JSON, listado, o texto
+                    _is_json = False
+                    _is_list = False
+                    _trimmed = output.strip()
+                    if _trimmed.startswith("{") or _trimmed.startswith("["):
+                        try:
+                            import json as _json
+                            _json.loads(_trimmed)
+                            _is_json = True
+                        except:
+                            pass
+                    if not _is_json:
+                        _line_count = len(output.split("\n"))
+                        if _line_count > 50:
+                            _is_list = True
+                    
+                    if _is_json:
+                        # JSON: mantener completo si < 20K, sino formato compacto
+                        if len(output) <= 20_000:
+                            pass  # mantener completo
+                        else:
+                            try:
+                                import json as _json2
+                                _minified = _json2.dumps(_json2.loads(_trimmed), separators=(",", ":"))
+                                if len(_minified) < len(output):
+                                    output = _minified + f"\n[...minified from {len(output)} chars to {len(_minified)} chars...]"
+                            except:
+                                output = output[:500] + f"\n[...{len(output)-1000} chars truncated...]\n" + output[-500:]
+                    elif _is_list:
+                        # Listado: primeras 100 lines + ultimas 100
+                        lines = output.split("\n")
+                        _head = lines[:100]
+                        _tail = lines[-100:] if len(lines) > 200 else []
+                        _omitted = len(lines) - len(_head) - len(_tail)
+                        output = "\n".join(_head)
+                        if _omitted > 0:
+                            output += f"\n[...{_omitted} lines omitted ({len(lines)} total)...]\n"
+                            output += "\n".join(_tail)
+                    else:
+                        # Texto: head(500) + tail(9500)
+                        output = output[:500] + f"\n[...{len(output)-1000} chars truncated...]\n" + output[-500:]
             
-            # T2: Cache de tool outputs en Redis (ahorra tokens de repetidos)
+            # L2: Cache de tool output in-session (por comando)
             try:
-                import hashlib as _hashlib
-                import subprocess as _sp
-                _cache_key = f"hermes:toolout:{_hashlib.md5(command.encode()).hexdigest()[:16]}"
-                _sp.run(["redis-cli", "SET", _cache_key, output.strip()[-2000:], "EX", "60"],
+                import hashlib as _hashlib2
+                _cache_key2 = _hashlib2.md5(command.encode()).hexdigest()[:16]
+                _OUTPUT_CACHE[_cache_key2] = output[-2000:]
+                # Cache en Redis (persistente entre sesiones, TTL 5min)
+                import subprocess as _sp2
+                _sp2.run(["redis-cli", "SET", f"hermes:toolout:{_cache_key2}", output[-2000:], "EX", "300"],
                     capture_output=True, timeout=2)
             except:
                 pass
