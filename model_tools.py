@@ -278,9 +278,14 @@ def get_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    query_context: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
+    
+    L28: Si se provee ``query_context``, filtra tools irrelevantes para la consulta.
+    Ej: si query_context='hora', solo tools de terminal + cache.
+    Esto reduce tokens de schema de ~10K a ~2K por llamada.
 
     All tools must be part of a toolset to be accessible.
 
@@ -293,6 +298,7 @@ def get_tool_definitions(
             tool_search / tool_describe bridge handlers so they can read the
             real catalog, not the already-collapsed one. Public callers should
             leave this False.
+        query_context: Optional user query for context-aware tool filtering.
 
     Returns:
         Filtered list of OpenAI-format tool definitions.
@@ -331,8 +337,21 @@ def get_tool_definitions(
             # schemas are treated as read-only by all known callers.
             return list(cached)
 
+    # L28: Context-aware tool filtering
+    _context_tools = None
+    if query_context:
+        _context_tools = _get_context_tools(query_context)
+    
     result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
-                                       skip_tool_search_assembly=skip_tool_search_assembly)
+                                       skip_tool_search_assembly=skip_tool_search_assembly,
+                                       query_context=query_context)
+    
+    # L28: Filtrar del resultado
+    if query_context and _context_tools is not None:
+        filtered = [t for t in result if t["function"]["name"] in _context_tools]
+        if filtered:
+            result = filtered
+    
     if quiet_mode:
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
@@ -356,8 +375,16 @@ def _compute_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    query_context: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
+    # L28: Si hay query_context, filtrar tools irrelevantes
+    _context_tools = None
+    if query_context:
+        q = query_context.lower()
+        # Mapa de consultas → tools necesarias
+        _context_tools = _get_context_tools(q)
+    
     # Determine which tool names the caller wants
     tools_to_include: set = set()
 
@@ -1254,3 +1281,61 @@ def check_toolset_requirements() -> Dict[str, bool]:
 def check_tool_availability(quiet: bool = False) -> Tuple[List[str], List[dict]]:
     """Return (available_toolsets, unavailable_info)."""
     return registry.check_tool_availability(quiet=quiet)
+
+
+# L28: Context-aware tool filtering
+_SIMPLE_TOOLS = {
+    "terminal", "read_file", "write_file", "patch", "search_files",
+    "web_search", "web_extract", "clarify", "memory", "todo",
+}
+_CREATIVE_TOOLS = _SIMPLE_TOOLS | {
+    "browser_navigate", "browser_snapshot", "browser_click", "browser_type",
+    "browser_vision", "delegate_task", "execute_code",
+    "vision_analyze", "image_generate", "text_to_speech",
+    "skill_view", "skill_manage", "skills_list",
+    "session_search", "cronjob", "process",
+}
+_ALL_TOOLS = None  # None means include everything
+
+def _get_context_tools(query: str) -> set | None:
+    """Return only the tools needed for a given query context.
+    
+    Returns None si la consulta necesita todas las tools (default).
+    Returns un set acotado si la consulta es simple.
+    """
+    # Consultas muy simples: solo herramientas basicas
+    _simple_patterns = [
+        "hora", "fecha", "que hora", "que fecha", "status", "estado",
+        "salud", "health", "quien sos", "who are", "ayuda", "help",
+        "hola", "gracias", "ok", "si", "no", "adios", "chao",
+    ]
+    
+    for pat in _simple_patterns:
+        if pat in query:
+            return _SIMPLE_TOOLS.copy()
+    
+    # Consultas de codigo: tools de archivos + terminal
+    _code_patterns = [
+        "codigo", "codigo", "archivo", "funcion", "clase", "script",
+        "git", "commit", "branch", "repo", "proyecto",
+        "pip", "dependencia", "import", "python",
+        "dev", "task", "desarrollar", "crea", "genera",
+    ]
+    
+    for pat in _code_patterns:
+        if pat in query:
+            return _SIMPLE_TOOLS | {"vision_analyze",}
+    
+    # Consultas de informacion: web + archivos
+    _info_patterns = [
+        "busca", "investiga", "encuentra", "googlea",
+        "que es", "significa", "definicion", "explica",
+        "noticia", "articulo", "informacion",
+    ]
+    
+    for pat in _info_patterns:
+        if pat in query:
+            return _SIMPLE_TOOLS | {"web_search", "web_extract"}
+    
+    # Default: todas las tools
+    return None
