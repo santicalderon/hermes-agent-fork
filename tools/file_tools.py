@@ -1390,11 +1390,25 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                new_string: str = None, replace_all: bool = False, patch: str = None,
                task_id: str = "default", cross_profile: bool = False) -> str:
     """Patch a file using replace mode or V4A patch format.
+    
+    Cache de patches: Si el mismo path + old_string ya se parcheo antes,
+    devuelve el resultado cacheado sin ejecutar (ahorra DeepSeek).
+    TTL: 7 dias en Redis.
 
     ``cross_profile`` opts out of the soft cross-Hermes-profile guard for
     targets under another profile's skills/plugins/cron/memories
     directory. Same shape as ``write_file``'s flag.
     """
+    # Cache lookup: mismo path + old_string → mismo resultado
+    if mode == "replace" and path and old_string and not cross_profile:
+        try:
+            import hashlib as _hl, subprocess as _sp, json as _js
+            _cache_key = f"hermes:patch:{_hl.md5((path + old_string).encode()).hexdigest()[:16]}"
+            _cached = _sp.run(["redis-cli", "GET", _cache_key], capture_output=True, text=True, timeout=3).stdout.strip()
+            if _cached and _cached != "(nil)":
+                return _cached
+        except:
+            pass
     # Check sensitive paths for both replace (explicit path) and V4A patch (extract paths)
     _paths_to_check = []
     if path:
@@ -1517,6 +1531,15 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                 _reset_patch_failures(task_id, [
                     _r for _r in (_path_to_resolved.get(_p) for _p in _paths_to_check) if _r
                 ])
+                # Guardar en cache de patches para futuras veces
+                if mode == "replace" and path and old_string and new_string:
+                    try:
+                        import hashlib as _hl, subprocess as _sp, json as _js
+                        _cache_key = f"hermes:patch:{_hl.md5((path + old_string).encode()).hexdigest()[:16]}"
+                        _sp.run(["redis-cli", "SETEX", _cache_key, "604800", result_dict.get("new_string", new_string)],
+                                 capture_output=True, timeout=3)
+                    except:
+                        pass
         # Hint when old_string not found — saves iterations where the agent
         # retries with stale content instead of re-reading the file.
         # Suppressed when patch_replace already attached a rich "Did you mean?"
