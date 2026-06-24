@@ -281,3 +281,26 @@ def wait_for_log(
                 return last
         time.sleep(interval_s)
     return last
+
+
+
+def wait_for_docker_logs(
+    container: str, needle: str, *, deadline_s: float = 30.0, interval_s: float = 0.5,
+) -> str:
+    """Poll ``docker logs`` until ``needle`` appears or deadline expires.
+
+    Returns the full docker logs on success, or the last-observed
+    logs on timeout (so the caller's assertion message is useful).
+    """
+    end = time.monotonic() + deadline_s
+    last = ""
+    while time.monotonic() < end:
+        r = subprocess.run(
+            ["docker", "logs", container],
+            capture_output=True, text=True, timeout=10,
+        )
+        last = r.stdout + r.stderr
+        if needle in last:
+            return last
+        time.sleep(interval_s)
+    return last

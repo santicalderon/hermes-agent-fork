@@ -23,7 +23,7 @@ from __future__ import annotations
 import subprocess
 import time
 
-from tests.docker.conftest import docker_exec_sh
+from tests.docker.conftest import docker_exec_sh, wait_for_docker_logs
 
 
 def _svstat(container: str, slot: str = "gateway-default") -> str:
@@ -66,9 +66,19 @@ def test_gateway_run_redirects_to_supervised(
         check=True, capture_output=True, timeout=30,
     )
 
-    # Give /init time to run cont-init.d, the wrapper time to dispatch
-    # the redirect, and s6-supervise time to spin up the slot.
-    time.sleep(5)
+    # Wait for the redirect breadcrumb to appear in docker logs.
+    # Under heavy parallel load (32-way docker test fan-out), the CMD
+    # process (main-wrapper.sh → python → hermes gateway run) can take
+    # well over 5s to reach the redirect logic. The breadcrumb is the
+    # definitive signal that the redirect fired — polling for it is
+    # both faster on quick machines and flake-free on slow ones.
+    logs = wait_for_docker_logs(container_name, "s6 supervision")
+    assert "s6 supervision" in logs, (
+        f"expected loud breadcrumb in docker logs; got:\n{logs}"
+    )
+    assert "--no-supervise" in logs, (
+        f"breadcrumb missing opt-out hint; got:\n{logs}"
+    )
 
     # Container should still be running. If the redirect didn't fire,
     # the foreground gateway would have crashed and the container
@@ -79,7 +89,7 @@ def test_gateway_run_redirects_to_supervised(
     )
     assert r.returncode == 0 and r.stdout.strip() == "running", (
         f"container exited prematurely: {r.stdout!r}; "
-        f"docker logs:\n{subprocess.run(['docker', 'logs', container_name], capture_output=True, text=True).stdout}"
+        f"docker logs:\n{logs}"
     )
 
     # s6's intent for the default-profile gateway slot should be up.
@@ -92,26 +102,24 @@ def test_gateway_run_redirects_to_supervised(
     )
 
     # The CMD process (PID under /init that the wrapper exec'd into)
-    # should be sleeping, not the gateway. We grep `ps` for the
-    # `sleep infinity` heartbeat.
-    r = docker_exec_sh(container_name, "ps -eo pid,cmd | grep -v grep | grep 'sleep infinity'")
-    assert r.returncode == 0 and "sleep infinity" in r.stdout, (
-        f"expected `sleep infinity` heartbeat process; got ps:\n{r.stdout}\n"
-        f"stderr: {r.stderr}"
+    # should be sleeping, not the gateway. We count `sleep infinity`
+    # processes parented to the CMD wrapper (main-wrapper.sh / rc.init
+    # top), NOT the static main-hermes service's sleep — a bare grep
+    # for `sleep infinity` would false-positive on the main-hermes
+    # sleep and pass even before the redirect fires.
+    r = docker_exec_sh(
+        container_name,
+        "ps -eo pid,ppid,cmd | grep -v grep | awk "
+        "'/main-wrapper.sh|rc.init top/ { wrapper_pid=$1 } "
+        "$3==\"sleep\" && $4==\"infinity\" && $2==wrapper_pid { c++ } "
+        "END { print c+0 }'",
     )
-
-    # And the loud breadcrumb should be in `docker logs` so users see
-    # the upgrade explanation.
-    r = subprocess.run(
-        ["docker", "logs", container_name],
-        capture_output=True, text=True, timeout=10,
-    )
-    logs = r.stdout + r.stderr
-    assert "s6 supervision" in logs, (
-        f"expected loud breadcrumb in docker logs; got:\n{logs}"
-    )
-    assert "--no-supervise" in logs, (
-        f"breadcrumb missing opt-out hint; got:\n{logs}"
+    assert r.returncode == 0
+    redirected_sleeps = int(r.stdout.strip() or 0)
+    assert redirected_sleeps == 1, (
+        f"expected one `sleep infinity` heartbeat parented to the CMD "
+        f"wrapper (the redirect); found {redirected_sleeps}. "
+        f"ps:\n{docker_exec_sh(container_name, 'ps -eo pid,ppid,cmd').stdout}"
     )
 
 
