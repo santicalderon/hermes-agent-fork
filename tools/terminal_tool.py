@@ -51,6 +51,11 @@ logger = logging.getLogger(__name__)
 
 # L2: Cache de tool outputs in-session (evita repetir comandos iguales)
 _OUTPUT_CACHE: dict = {}
+# Limpiar cache al iniciar nueva sesion
+import atexit as _atexit
+@_atexit.register
+def _clear_output_cache():
+    _OUTPUT_CACHE.clear()
 
 
 # ---------------------------------------------------------------------------
