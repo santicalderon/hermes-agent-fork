@@ -1607,7 +1607,7 @@ READ_FILE_SCHEMA = {
         "properties": {
             "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
-            "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 500, max: 2000)", "default": 500, "maximum": 2000}
+            "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 100). Use larger values for big files.", "default": 100, "maximum": 2000}
         },
         "required": ["path"]
     }
@@ -1694,7 +1694,7 @@ SEARCH_FILES_SCHEMA = {
             "file_glob": {"type": "string", "description": "Filter files by pattern in grep mode (e.g., '*.py' to only search Python files)"},
             "limit": {"type": "integer", "description": "Maximum number of results to return (default: 50)", "default": 50},
             "offset": {"type": "integer", "description": "Skip first N results for pagination (default: 0)", "default": 0},
-            "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "Output format for grep mode: 'content' shows matching lines with line numbers, 'files_only' lists file paths, 'count' shows match counts per file", "default": "content"},
+            "output_mode": {"type": "string", "enum": ["content", "files_only", "count"], "description": "Output format: 'files_only' lists file paths (default, eficiente). 'content' shows matching lines. 'count' shows match counts per file.", "default": "files_only"},
             "context": {"type": "integer", "description": "Number of context lines before and after each match (grep mode only)", "default": 0}
         },
         "required": ["pattern"]
