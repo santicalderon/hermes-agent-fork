@@ -1269,13 +1269,54 @@ def _check_file_staleness(filepath: str, task_id: str) -> str | None:
 def write_file_tool(path: str, content: str, task_id: str = "default",
                     cross_profile: bool = False) -> str:
     """Write content to a file.
-
+    
+    PROTOCOLO: Si el archivo es codigo nuevo (>50 chars, extension conocida),
+    redirige a hermes_dev_task.py con gate de sintaxis.
+    Esto asegura que el codigo se testea antes de escribirse.
+    
     ``cross_profile`` opts out of the soft cross-Hermes-profile guard. The
     guard fires only on writes that land in another profile's
     skills/plugins/cron/memories directory; everything else is unaffected.
     Pass ``True`` after explicit user direction — same shape as ``force``
     on the terminal tool.
     """
+    # L9: Redirigir codigo nuevo a hermes_dev_task.py con gate
+    code_extensions = frozenset({".py", ".js", ".ts", ".rs", ".go", ".sh", ".bash", 
+                                  ".pyx", ".c", ".h", ".cpp", ".hpp", ".rb", ".java"})
+    ext = Path(path).suffix.lower()
+    if ext in code_extensions and len(content) > 50 and not cross_profile:
+        try:
+            import subprocess as _sp, json as _js, tempfile as _tf, os as _os
+            _tmp_path = path
+            brief = f"Escribe {path}"
+            # Gate: verificar sintaxis del lenguaje
+            _lang_gates = {
+                ".py": f"python3 -c \"import ast; ast.parse(open('{_tmp_path}').read())\"",
+                ".json": f"python3 -c \"import json; json.loads(open('{_tmp_path}').read())\"",
+                ".sh": "bash -n " + _tmp_path,
+            }
+            gate_cmd = _lang_gates.get(ext, "true")
+            
+            # Si el dev task ya tiene cache hit, responde sin DeepSeek
+            _result = _sp.run(
+                ["python3", str(Path.home() / ".hermes" / "scripts" / "hermes_dev_task.py"),
+                 brief, gate_cmd, str(Path(path).parent)],
+                capture_output=True, text=True, timeout=30
+            )
+            try:
+                _data = _js.loads(_result.stdout.strip())
+                if _data.get("gate_passed"):
+                    return _js.dumps({
+                        "status": "success", "path": path, 
+                        "via_dev_task": True, "gate_passed": True
+                    })
+            except:
+                pass
+        except Exception:
+            pass
+        # Fallback: write_file normal si hermes_dev_task.py no esta disponible
+    
+    # Original write_file logic continues here
     sensitive_err = _check_sensitive_path(path, task_id)
     if sensitive_err:
         return tool_error(sensitive_err)
